@@ -32,7 +32,8 @@
 
 /* Private define ------------------------------------------------------------*/
 /* USER CODE BEGIN PD */
-
+#define BTN_MSG_NORMAL_PRESS  0U  /* short press: blink 1 Hz for 5 s */
+#define BTN_MSG_LONG_PRESS    1U  /* long press (hold >1s): blink 10 Hz for 5 s */
 /* USER CODE END PD */
 
 /* Private macro -------------------------------------------------------------*/
@@ -71,7 +72,7 @@ const osThreadAttr_t defaultTask_attributes = {
 osThreadId_t task1Handle;
 osThreadId_t task2Handle;
 
-osSemaphoreId_t btnSemHandle;
+osMessageQueueId_t btnQueueHandle;  /* queue of uint32_t: NORMAL_PRESS or LONG_PRESS */
 osSemaphoreId_t timerSemHandle;
 osMutexId_t blinkMutexHandle;
 /* USER CODE END PV */
@@ -100,6 +101,7 @@ void Task1(void *argument);
 void Task2(void *argument);
 static void blink_led2_1hz_5s(void);
 static void blink_led2_10hz_2s(void);
+static void blink_led2_10hz_5s(void);
 /* USER CODE END PFP */
 
 /* Private user code ---------------------------------------------------------*/
@@ -126,14 +128,33 @@ static void blink_led2_10hz_2s(void)
   }
 }
 
+/* 10 Hz for 5 s: 50 cycles of 50 ms on / 50 ms off (Task_1 long-press blink) */
+static void blink_led2_10hz_5s(void)
+{
+  for (int i = 0; i < 50; i++)
+  {
+    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_SET);
+    osDelay(50);
+    HAL_GPIO_WritePin(GPIOB, GPIO_PIN_14, GPIO_PIN_RESET);
+    osDelay(50);
+  }
+}
+
 void Task1(void *argument)
 {
+  uint32_t msg;
+
   for (;;)
   {
-    osSemaphoreAcquire(btnSemHandle, osWaitForever);
-    osMutexAcquire(blinkMutexHandle, osWaitForever);
-    blink_led2_1hz_5s();
-    osMutexRelease(blinkMutexHandle);
+    if (osMessageQueueGet(btnQueueHandle, &msg, NULL, osWaitForever) == osOK)
+    {
+      osMutexAcquire(blinkMutexHandle, osWaitForever);
+      if (msg == BTN_MSG_LONG_PRESS)
+        blink_led2_10hz_5s();
+      else
+        blink_led2_1hz_5s();
+      osMutexRelease(blinkMutexHandle);
+    }
   }
 }
 
@@ -231,7 +252,7 @@ int main(void)
 
   osKernelInitialize();
 
-  btnSemHandle = osSemaphoreNew(1, 0, NULL);
+  btnQueueHandle = osMessageQueueNew(4, sizeof(uint32_t), NULL);
   timerSemHandle = osSemaphoreNew(1, 0, NULL);
   blinkMutexHandle = osMutexNew(NULL);
 
@@ -1019,9 +1040,9 @@ static void MX_GPIO_Init(void)
   GPIO_InitStruct.Pull = GPIO_NOPULL;
   HAL_GPIO_Init(GPIOE, &GPIO_InitStruct);
 
-  /*Configure GPIO pin : PC13 (User button – EXTI for Task_1) */
+  /*Configure GPIO pin : PC13 (User button – EXTI both edges for normal/long press) */
   GPIO_InitStruct.Pin = GPIO_PIN_13;
-  GPIO_InitStruct.Mode = GPIO_MODE_IT_FALLING;
+  GPIO_InitStruct.Mode = GPIO_MODE_IT_RISING_FALLING;
   GPIO_InitStruct.Pull = GPIO_PULLUP;
   HAL_GPIO_Init(GPIOC, &GPIO_InitStruct);
 
@@ -1122,9 +1143,23 @@ void HAL_TIM_PeriodElapsedCallback(TIM_HandleTypeDef *htim)
 
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
+  static uint32_t press_tick = 0;
+  uint32_t msg;
+
   if (GPIO_Pin == GPIO_PIN_13)
   {
-    osSemaphoreRelease(btnSemHandle);
+    if (HAL_GPIO_ReadPin(GPIOC, GPIO_PIN_13) == GPIO_PIN_RESET)
+    {
+      /* Falling edge: button just pressed */
+      press_tick = HAL_GetTick();
+    }
+    else
+    {
+      /* Rising edge: button released – classify normal vs long press (hold >1s) */
+      uint32_t elapsed = HAL_GetTick() - press_tick;
+      msg = (elapsed >= 1000U) ? BTN_MSG_LONG_PRESS : BTN_MSG_NORMAL_PRESS;
+      (void) osMessageQueuePut(btnQueueHandle, &msg, 0, 0);
+    }
   }
 }
 /* USER CODE END 4 */
