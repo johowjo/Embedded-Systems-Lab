@@ -24,6 +24,8 @@ class BoardVisibleHandler(BaseHTTPRequestHandler):
         accel_x = query.get("x", ["N/A"])[0]
         accel_y = query.get("y", ["N/A"])[0]
         accel_z = query.get("z", ["N/A"])[0]
+        src = query.get("src", ["N/A"])[0]
+        event = query.get("event", ["N/A"])[0]
 
         if parsed.path == "/accel":
             print(
@@ -31,12 +33,20 @@ class BoardVisibleHandler(BaseHTTPRequestHandler):
                 f"(client {self.client_address[0]}:{self.client_address[1]}): "
                 f"x={accel_x}, y={accel_y}, z={accel_z}"
             )
+        elif parsed.path == "/motion":
+            print(
+                "Significant motion event from board "
+                f"(client {self.client_address[0]}:{self.client_address[1]}): "
+                f"event={event}, x={accel_x}, y={accel_y}, z={accel_z}, src={src}"
+            )
 
         body = (
             "STM32 host test server is running.\n"
             f"Client: {self.client_address[0]}:{self.client_address[1]}\n"
             f"Path: {self.path}\n"
+            f"Event: {event}\n"
             f"Accel: x={accel_x} y={accel_y} z={accel_z}\n"
+            f"FuncSrc: {src}\n"
         ).encode("utf-8")
 
         self.send_response(200)
