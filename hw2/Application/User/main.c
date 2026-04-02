@@ -90,6 +90,7 @@ int main(void)
   uint8_t func_src1;
   uint32_t LastFuncSrcPollMs = 0;
   uint32_t MotionWarmupEndMs = 0;
+  uint32_t LastAccelSendMs = 0;
 
   /* Reset of all peripherals, Initializes the Flash interface and the Systick. */
   HAL_Init();
@@ -341,6 +342,64 @@ int main(void)
             TERMOUT("> ERROR : Failed to Receive Data, connection closed\n");
             break;
           }
+        }
+      }
+
+      /* Periodic accelerometer streaming to the host server. */
+      if ((HAL_GetTick() - LastAccelSendMs) >= 1000U)
+      {
+        LastAccelSendMs = HAL_GetTick();
+
+        BSP_ACCELERO_AccGetXYZ(accel);
+        TERMOUT("> Accel: x=%d y=%d z=%d\n", accel[0], accel[1], accel[2]);
+
+        tx_len = snprintf(
+          TxData,
+          sizeof(TxData),
+          "GET /accel?x=%d&y=%d&z=%d HTTP/1.1\r\n"
+          "Host: %d.%d.%d.%d:%d\r\n"
+          "Connection: keep-alive\r\n"
+          "\r\n",
+          accel[0],
+          accel[1],
+          accel[2],
+          RemoteIP[0],
+          RemoteIP[1],
+          RemoteIP[2],
+          RemoteIP[3],
+          RemotePORT);
+
+        if ((tx_len <= 0) || (tx_len >= (int)sizeof(TxData)))
+        {
+          TERMOUT("> ERROR : Failed to format accel HTTP request\n");
+          break;
+        }
+
+        ret = WIFI_SendData(Socket, (uint8_t *)TxData, (uint16_t)tx_len, &Datalen, WIFI_WRITE_TIMEOUT);
+        if (ret != WIFI_STATUS_OK)
+        {
+          TERMOUT("> ERROR : Failed to Send accel request, connection closed\n");
+          break;
+        }
+
+        ret = WIFI_ReceiveData(Socket, RxData, sizeof(RxData)-1, &Datalen, WIFI_READ_TIMEOUT);
+        if (ret == WIFI_STATUS_OK)
+        {
+          if (Datalen > 0)
+          {
+            RxData[Datalen] = 0;
+            /* Body not printed to keep UART logs readable. */
+          }
+          else
+          {
+            TERMOUT("> Server closed connection.\n");
+            break;
+          }
+        }
+        else
+        {
+          TERMOUT("> ERROR : Failed to Receive accel data, connection closed\n");
+          break;
         }
       }
 
