@@ -4,7 +4,7 @@ import struct
 import sys
 import time
 
-from bluepy.btle import Scanner, DefaultDelegate, Peripheral, BTLEDisconnectError
+from bluepy.btle import Scanner, DefaultDelegate, Peripheral, BTLEDisconnectError, BTLEGattError
 
 # ====== Match these to your iPhone nRF Connect setup ======
 TARGET_NAME = "pad"
@@ -25,7 +25,8 @@ class NotificationDelegate(DefaultDelegate):
             text = data.decode("utf-8", errors="replace")
         except Exception:
             text = repr(data)
-        print(f"[INDICATION] handle=0x{cHandle:04X} data={data.hex()} text={text}")
+        # bluepy delivers both notifications and indications through this callback.
+        print(f"[NOTIFY/INDICATE] handle=0x{cHandle:04X} data={data.hex()} text={text}")
 
 
 def scan_for_device(name, timeout=8):
@@ -84,8 +85,6 @@ def main():
     try:
         svc = p.getServiceByUUID(SERVICE_UUID)
         print(f"Connected. Found service {svc.uuid}")
-
-        print(f"Connected. Found service {svc.uuid}")
         for ch in svc.getCharacteristics():
             print(
                 f"UUID={ch.uuid} "
@@ -94,7 +93,7 @@ def main():
             )
 
         indicate_char = svc.getCharacteristics(INDICATE_CHAR_UUID)[0]
-        print(f"Indicate characteristic handle:   0x{indicate_char.getHandle():04X}")
+        print(f"Target characteristic handle:     0x{indicate_char.getHandle():04X}")
 
         cccd_handle = find_cccd_handle(indicate_char)
         if cccd_handle is None:
@@ -103,21 +102,67 @@ def main():
 
         print(f"CCCD handle found: 0x{cccd_handle:04X}")
 
-        # 0x0002 in little-endian => b"\x02\x00"
-        cccd_value = struct.pack("<H", 0x0002)
-        print(f"Writing CCCD value {cccd_value.hex()} (enable indications)")
-        p.writeCharacteristic(cccd_handle, cccd_value, withResponse=True)
-        print("CCCD write complete.")
-        print("This should set the phone-side CCCD to 0x0002.")
+        # Try dual-subscription first, then gracefully fall back.
+        # 0x0003: notify+indicate, 0x0002: indicate only, 0x0001: notify only
+        cccd_candidates = [
+            (0x0003, "notify + indicate"),
+            (0x0002, "indicate only"),
+            (0x0001, "notify only"),
+        ]
+        enabled_mode = None
+        for cccd_raw, label in cccd_candidates:
+            cccd_value = struct.pack("<H", cccd_raw)
+            try:
+                print(f"Writing CCCD value {cccd_value.hex()} ({label})")
+                p.writeCharacteristic(cccd_handle, cccd_value, withResponse=True)
+                print(f"CCCD write complete. Enabled mode: {label}")
+                enabled_mode = cccd_raw
+                break
+            except BTLEGattError as e:
+                print(f"CCCD write failed for {label}: {e}")
+            except BTLEDisconnectError as e:
+                print(f"Disconnected during CCCD write for {label}: {e}")
+                break
 
-        print("\nWaiting up to 30 seconds for indications...\n")
+        if enabled_mode is None:
+            print("Could not enable notify/indicate on CCCD with 0x0003/0x0002/0x0001.")
+            sys.exit(1)
+
+        print("\nWaiting up to 30 seconds for notify/indicate packets...\n")
+        print("Polling read is also enabled to detect value changes without notifications.")
         end_time = time.time() + 30
+        last_read_value = None
         while time.time() < end_time:
-            if p.waitForNotifications(1.0):
-                continue
-            print("...waiting...")
+            try:
+                got_event = p.waitForNotifications(1.0)
+            except BTLEDisconnectError as e:
+                print(f"Disconnected while waiting for notifications: {e}")
+                break
 
-        print("\nDisabling indications (writing CCCD = 0x0000)")
+            try:
+                current_value = indicate_char.read()
+            except BTLEDisconnectError as e:
+                print(f"Disconnected while reading characteristic: {e}")
+                break
+            except BTLEGattError as e:
+                print(f"Read failed: {e}")
+                current_value = None
+
+            if current_value is not None and current_value != last_read_value:
+                try:
+                    text = current_value.decode("utf-8", errors="replace")
+                except Exception:
+                    text = repr(current_value)
+                print(
+                    f"[READ CHANGE] handle=0x{indicate_char.getHandle():04X} "
+                    f"data={current_value.hex()} text={text}"
+                )
+                last_read_value = current_value
+
+            if not got_event:
+                print("...waiting...")
+
+        print("\nDisabling notify/indicate (writing CCCD = 0x0000)")
         p.writeCharacteristic(cccd_handle, struct.pack("<H", 0x0000), withResponse=True)
         print("Done.")
 
