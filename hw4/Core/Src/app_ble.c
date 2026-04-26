@@ -188,8 +188,10 @@ void APP_BLE_Init(void)
                                      USE_FIXED_PIN_FOR_PAIRING, 123456,
                                      BONDING);
 
-  /* Register our custom accelerator service (characteristic_a + _b). */
-  (void)Add_Acc_Service();
+  /* Register our custom accelerator service (characteristic_a, _b, _c). */
+  tBleStatus svc_ret = Add_Acc_Service();
+  printf("[BLE] Add_Acc_Service -> 0x%02X  (0x00 = OK; anything else means "
+         "char_c may not be registered)\r\n", svc_ret);
 
   (void)aci_hal_set_tx_power_level(1, 4);
 
@@ -201,6 +203,19 @@ void APP_BLE_Init(void)
   if (LSM6DSM_Init(&hi2c2))
   {
     printf("[ACC] LSM6DSM init OK\r\n");
+
+    /* Turn on the embedded "significant motion" function. The event is
+     * routed to INT1 -> PD11 -> EXTI15_10_IRQ. From there the ISR sets
+     * APP_EVT_MOTION so TASK_ACC can do the I2C ack + BLE notify in
+     * task context. */
+    if (LSM6DSM_EnableSigMotion())
+    {
+      printf("[ACC] LSM6DSL significant motion detection ENABLED (INT1=PD11)\r\n");
+    }
+    else
+    {
+      printf("[ACC] LSM6DSL significant motion init FAILED\r\n");
+    }
   }
   else
   {
@@ -208,6 +223,20 @@ void APP_BLE_Init(void)
   }
 
   printf("[BLE] stack ready, advertising as STM32_ACC\r\n");
+}
+
+/* ---- EXTI ISR glue --------------------------------------------------------
+ * Called from HAL_GPIO_EXTI_Callback when PD11 (LSM6DSL INT1) fires. We do
+ * not touch the sensor or BlueNRG here - those are blocking I2C/SPI calls.
+ * Instead we just flip an event flag that TASK_ACC watches. osEventFlagsSet
+ * is ISR-safe in CMSIS-RTOS2 (configUSE_OS2_EVENTFLAGS_FROM_ISR = 1).
+ *--------------------------------------------------------------------------*/
+void Motion_OnIsr(void)
+{
+  if (appEventsHandle != NULL)
+  {
+    (void)osEventFlagsSet(appEventsHandle, APP_EVT_MOTION);
+  }
 }
 
 /* ---- GAP helpers ----------------------------------------------------------*/
@@ -297,6 +326,45 @@ void TASK_ACC_Run(void)
   LSM6DSM_Axes_t      raw;
   AccelAxes_t         axes;
   uint32_t            now;
+
+  /* Significant-motion event pending? Handle it first.
+   *
+   *   - Reading FUNC_SRC1 over I2C2 both confirms SIGN_MOTION_IA and
+   *     deasserts the latched INT1 line. LSM6DSM_ClearSigMotionFlag()
+   *     returns true only if this was a real, post-warmup SMD event -
+   *     it filters out spurious EXTI edges and the startup glitch the
+   *     LSM6DSL latches during its own init (same approach as hw2).
+   *   - The BLE notify needs the bleMutex (shared SPI3 bus with TASK_BLE).
+   *
+   * Running this in TASK_ACC (not the ISR, not TASK_BLE) keeps I2C2 single-
+   * threaded and keeps the ISR non-blocking. */
+  if ((osEventFlagsGet(appEventsHandle) & APP_EVT_MOTION) != 0U)
+  {
+    (void)osEventFlagsClear(appEventsHandle, APP_EVT_MOTION);
+
+    if (LSM6DSM_ClearSigMotionFlag())
+    {
+      tBleStatus st = 0xFFU;
+
+      if (connected)
+      {
+        App_Ble_Lock();
+        st = Motion_Notify();
+        App_Ble_Unlock();
+      }
+
+      /* Status decoding (BlueNRG bluenrg_def.h):
+       *   0x00 BLE_STATUS_SUCCESS
+       *   0x12 BLE_STATUS_INVALID_HANDLE    (char not registered)
+       *   0x1F BLE_STATUS_INSUFFICIENT_RESOURCES (tx queue full / drop me)
+       *   0x46 BLE_STATUS_NOT_ALLOWED       (client not subscribed?) */
+      printf("[MOT] significant motion (count=%u, %sconnected, "
+             "notify_status=0x%02X)\r\n",
+             Motion_GetCount(),
+             connected ? "" : "NOT ",
+             st);
+    }
+  }
 
   if (!connected)
   {

@@ -55,6 +55,24 @@ the clamped value.
 
 Press `Ctrl-C` (or type `q`) to stop.
 
+### Significant-motion events
+
+The firmware enables the LSM6DSL's built-in **Significant Motion
+Detection** (SMD) block. When the sensor decides that "meaningful"
+movement has happened (walking, picking up the board, a shake —
+but not a single tap), it pulses INT1 (PD11) into EXTI11 on the
+STM32, which sets an RTOS event flag; TASK_ACC then acks the sensor
+over I2C and pushes a 1-byte counter notification over
+characteristic_c. The RPi client subscribes automatically and prints:
+
+```
+[MOT ] *** SIGNIFICANT MOTION *** (counter=1, total_events=1)
+```
+
+Try it by shaking the dev board or walking a few steps while
+holding it — SMD has ~1–2 s of latency by design (it filters out
+isolated bumps).
+
 ## Protocol (for reference)
 
 | Role              | UUID                                     | Props        | Payload |
@@ -62,6 +80,7 @@ Press `Ctrl-C` (or type `q`) to stop.
 | Service           | `1bc5d5a5-0200-36ac-e111-010000000000`   | -            | - |
 | characteristic_a  | `1bc5d5a5-0200-36ac-e111-0100aa000000`   | notify, read | 6 B: `int16 x, int16 y, int16 z` (mg, LE) |
 | characteristic_b  | `1bc5d5a5-0200-36ac-e111-0100bb000000`   | write, read  | 2 B: `uint16 freq_hz` (LE, clamped 1..104) |
+| characteristic_c  | `1bc5d5a5-0200-36ac-e111-0100cc000000`   | notify, read | 1 B: `uint8 motion_count` (LSM6DSL SMD event counter, wraps at 255) |
 
 ## Troubleshooting
 

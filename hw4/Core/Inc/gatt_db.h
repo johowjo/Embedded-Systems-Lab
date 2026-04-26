@@ -10,11 +10,15 @@
   *     UUID : ...AA...
   *     Value: int16_t X, int16_t Y, int16_t Z  (little-endian, 6 bytes, mg)
   *
-  *   characteristic_b: sampling frequency in Hz       -> WRITE
-  *     UUID : ...BB...
-  *     Value: uint16_t freq_hz (little-endian, 2 bytes)
-  ******************************************************************************
-  */
+ *   characteristic_b: sampling frequency in Hz       -> WRITE
+ *     UUID : ...BB...
+ *     Value: uint16_t freq_hz (little-endian, 2 bytes)
+ *
+ *   characteristic_c: significant-motion counter     -> NOTIFY
+ *     UUID : ...CC...
+ *     Value: uint8_t motion_count (starts at 0, ++ on each SMD event)
+ ******************************************************************************
+ */
 
 #ifndef GATT_DB_H
 #define GATT_DB_H
@@ -36,6 +40,14 @@ typedef struct
 tBleStatus Add_Acc_Service(void);
 
 tBleStatus Acc_Notify(const AccelAxes_t *axes);
+
+/*
+ * Increments the internal motion counter and notifies characteristic_c.
+ * Caller must already hold the BlueNRG-MS mutex (same as Acc_Notify).
+ */
+tBleStatus Motion_Notify(void);
+
+uint8_t Motion_GetCount(void);
 
 void Acc_GattWrite_CB(uint16_t attr_handle, uint8_t data_len, const uint8_t *data);
 

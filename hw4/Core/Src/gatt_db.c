@@ -42,23 +42,32 @@ do {                                                                            
   COPY_UUID_128((u),0x1B,0xC5,0xD5,0xA5,0x02,0x00,0x36,0xAC, \
                     0xE1,0x11,0x01,0x00,0xBB,0x00,0x00,0x00)
 
+/* Characteristic_c : significant-motion event counter (notify) */
+#define COPY_ACC_MOTION_CHAR_UUID(u) \
+  COPY_UUID_128((u),0x1B,0xC5,0xD5,0xA5,0x02,0x00,0x36,0xAC, \
+                    0xE1,0x11,0x01,0x00,0xCC,0x00,0x00,0x00)
+
 /* Handles (filled by aci_gatt_add_serv/add_char) ------------------------------*/
-static uint16_t AccServiceHandle  = 0;
-static uint16_t AccValueCharHandle = 0;
-static uint16_t AccFreqCharHandle  = 0;
+static uint16_t AccServiceHandle    = 0;
+static uint16_t AccValueCharHandle  = 0;
+static uint16_t AccFreqCharHandle   = 0;
+static uint16_t AccMotionCharHandle = 0;
 
 /* Current accelerometer sampling frequency (Hz) ------------------------------*/
 static volatile uint16_t acc_freq_hz = ACC_FREQ_DEFAULT_HZ;
+
+/* Significant-motion event counter (wraps at 255). Exposed on char_c. --------*/
+static volatile uint8_t motion_count = 0;
 
 tBleStatus Add_Acc_Service(void)
 {
   tBleStatus ret;
   uint8_t uuid[16];
 
-  /* 1) Primary service: enough records for 2 characteristics (1 svc + 3*N) */
+  /* 1) Primary service: enough records for 3 characteristics (1 svc + 3*N) */
   COPY_ACC_SERVICE_UUID(uuid);
   ret = aci_gatt_add_serv(UUID_TYPE_128, uuid, PRIMARY_SERVICE,
-                          1 + 3 * 2, &AccServiceHandle);
+                          1 + 3 * 3, &AccServiceHandle);
   if (ret != BLE_STATUS_SUCCESS)
   {
     return ret;
@@ -98,6 +107,24 @@ tBleStatus Add_Acc_Service(void)
   init_freq[1] = (uint8_t)((acc_freq_hz >> 8) & 0xFF);
   (void)aci_gatt_update_char_value(AccServiceHandle, AccFreqCharHandle,
                                    0, 2, init_freq);
+
+  /* 4) characteristic_c : 1-byte motion counter, NOTIFY (+READ for convenience) */
+  COPY_ACC_MOTION_CHAR_UUID(uuid);
+  ret = aci_gatt_add_char(AccServiceHandle, UUID_TYPE_128, uuid,
+                          1,
+                          CHAR_PROP_NOTIFY | CHAR_PROP_READ,
+                          ATTR_PERMISSION_NONE,
+                          GATT_DONT_NOTIFY_EVENTS,
+                          16, 0,
+                          &AccMotionCharHandle);
+  if (ret != BLE_STATUS_SUCCESS)
+  {
+    return ret;
+  }
+
+  uint8_t init_mot = motion_count;
+  (void)aci_gatt_update_char_value(AccServiceHandle, AccMotionCharHandle,
+                                   0, 1, &init_mot);
 
   return BLE_STATUS_SUCCESS;
 }
@@ -148,4 +175,17 @@ void Acc_GattWrite_CB(uint16_t attr_handle, uint8_t data_len, const uint8_t *dat
 uint16_t Acc_GetSamplingFreqHz(void)
 {
   return acc_freq_hz;
+}
+
+tBleStatus Motion_Notify(void)
+{
+  motion_count = (uint8_t)(motion_count + 1U);
+  uint8_t v = motion_count;
+  return aci_gatt_update_char_value(AccServiceHandle, AccMotionCharHandle,
+                                    0, 1, &v);
+}
+
+uint8_t Motion_GetCount(void)
+{
+  return motion_count;
 }

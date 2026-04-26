@@ -3,13 +3,17 @@
 BLE client for the STM32 Accelerator GATT server.
 
 Talks to the firmware in this repo (Core/Src/gatt_db.c + app_ble.c), which
-advertises as "STM32_ACC" and exposes one custom service with two chars:
+advertises as "STM32_ACC" and exposes one custom service with three chars:
 
   Service                 1BC5D5A5-0200-36AC-E111-010000000000
     characteristic_a      1BC5D5A5-0200-36AC-E111-0100AA000000  notify  (6 B)
                           int16 x_mg, int16 y_mg, int16 z_mg   (little-endian)
     characteristic_b      1BC5D5A5-0200-36AC-E111-0100BB000000  write   (2 B)
                           uint16 freq_hz                        (little-endian)
+    characteristic_c      1BC5D5A5-0200-36AC-E111-0100CC000000  notify  (1 B)
+                          uint8 motion_count   - LSM6DSL significant motion
+                          event counter (++ each time the sensor's embedded
+                          SMD function fires on INT1 / PD11)
 
 Usage on a Raspberry Pi (any Linux with BlueZ >= 5.50):
 
@@ -51,6 +55,7 @@ DEVICE_NAME        = "STM32_ACC"
 SERVICE_UUID       = "1bc5d5a5-0200-36ac-e111-010000000000"
 ACCEL_CHAR_UUID    = "1bc5d5a5-0200-36ac-e111-0100aa000000"  # notify  (6 B)
 FREQ_CHAR_UUID     = "1bc5d5a5-0200-36ac-e111-0100bb000000"  # write   (2 B)
+MOTION_CHAR_UUID   = "1bc5d5a5-0200-36ac-e111-0100cc000000"  # notify  (1 B)
 
 FREQ_MIN_HZ        = 1
 FREQ_MAX_HZ        = 104
@@ -202,13 +207,42 @@ async def run(args: argparse.Namespace) -> int:
         print(f"[CSV ] logging to {args.csv}")
 
     # Stats for measuring the actual notification rate.
-    stats = {"count": 0, "t_last_report": time.monotonic(), "total": 0}
+    stats = {"count": 0, "t_last_report": time.monotonic(), "total": 0,
+             "motion_events": 0, "motion_last": None}
 
     # Printing policy:
     #   --print-every N > 0  : print one line every N samples
     #   --print-every 0      : print every sample (beware: 104/s is a lot)
     #   default              : print one summary line per second
     print_every = args.print_every
+
+    def on_motion(_char, data: bytearray) -> None:
+        """
+        characteristic_c: 1-byte rolling counter. The LSM6DSL's embedded
+        "significant motion" block fires INT1; the STM32 bumps this counter
+        and notifies. We detect new events by counter change (handles the
+        uint8 wrap-around at 255 cleanly).
+        """
+        if not data:
+            return
+        cnt = int(data[0])
+        prev = stats["motion_last"]
+        if prev is None:
+            # First sample after (re)subscribe - don't count as "new".
+            stats["motion_last"] = cnt
+            print(f"[MOT ] initial motion counter = {cnt}")
+            return
+        delta = (cnt - prev) & 0xFF
+        if delta == 0:
+            return
+        stats["motion_events"] += delta
+        stats["motion_last"] = cnt
+        if delta == 1:
+            print(f"[MOT ] *** SIGNIFICANT MOTION *** (counter={cnt}, "
+                  f"total_events={stats['motion_events']})")
+        else:
+            print(f"[MOT ] *** {delta} MOTION events *** (counter={cnt}, "
+                  f"total_events={stats['motion_events']})")
 
     def on_accel(_char, data: bytearray) -> None:
         try:
@@ -249,11 +283,27 @@ async def run(args: argparse.Namespace) -> int:
         if SERVICE_UUID.lower() not in {s.uuid.lower() for s in svcs}:
             print("[WARN] service UUID not advertised in GATT table - "
                   "continuing anyway (BlueNRG-MS sometimes omits it from SDP)")
+        found_motion = False
         for s in svcs:
             if s.uuid.lower() == SERVICE_UUID.lower():
                 for c in s.characteristics:
                     props = ",".join(c.properties)
                     print(f"       char {c.uuid}  [{props}]")
+                    if c.uuid.lower() == MOTION_CHAR_UUID:
+                        found_motion = True
+                        if "notify" not in c.properties:
+                            print("[WARN] char_c present but does NOT "
+                                  "advertise 'notify' - firmware GATT "
+                                  "DB is wrong")
+                        # Descriptors include the CCCD (0x2902). If it's
+                        # missing, start_notify() will silently do nothing.
+                        for d in c.descriptors:
+                            print(f"              descr {d.uuid} "
+                                  f"(handle={d.handle})")
+        if not found_motion:
+            print("[WARN] characteristic_c (motion) NOT found in GATT "
+                  "table - firmware did not register it. Expected UUID: "
+                  f"{MOTION_CHAR_UUID}")
 
         # Read the current frequency from char_b (firmware seeds it to 10 Hz).
         try:
@@ -275,9 +325,32 @@ async def run(args: argparse.Namespace) -> int:
             (back_hz,) = struct.unpack("<H", back[:2])
             print(f"[FREQ] readback = {back_hz} Hz")
 
-        # Subscribe to characteristic_a notifications.
+        # Subscribe to characteristic_a (acceleration stream) and
+        # characteristic_c (significant-motion events).
         await client.start_notify(ACCEL_CHAR_UUID, on_accel)
         print("[NOTF] subscribed to characteristic_a - streaming ...")
+        motion_subscribed = False
+        if found_motion:
+            try:
+                await client.start_notify(MOTION_CHAR_UUID, on_motion)
+                motion_subscribed = True
+                print("[NOTF] subscribed to characteristic_c - "
+                      "waiting for significant-motion events")
+                # Prime the counter so the first real event registers as +1
+                # rather than being swallowed by the "first sample" path in
+                # on_motion(). We poll once; firmware initial value is 0.
+                try:
+                    cur = await client.read_gatt_char(MOTION_CHAR_UUID)
+                    if cur:
+                        stats["motion_last"] = int(cur[0])
+                        print(f"[MOT ] baseline motion counter = "
+                              f"{stats['motion_last']}")
+                except Exception as e:
+                    print(f"[MOT ] baseline read failed (non-fatal): {e}")
+            except Exception as e:
+                print(f"[NOTF] motion subscribe FAILED: {e}")
+        else:
+            print("[NOTF] skipping motion subscribe (char_c not in GATT)")
 
         # Start the interactive stdin task (unless disabled).
         control_task: Optional[asyncio.Task] = None
@@ -302,7 +375,11 @@ async def run(args: argparse.Namespace) -> int:
                     await control_task
             with suppress(Exception):
                 await client.stop_notify(ACCEL_CHAR_UUID)
-            print(f"[DONE] received {stats['total']} samples")
+            if motion_subscribed:
+                with suppress(Exception):
+                    await client.stop_notify(MOTION_CHAR_UUID)
+            print(f"[DONE] received {stats['total']} samples, "
+                  f"{stats['motion_events']} significant-motion events")
             if csv_file is not None:
                 csv_file.close()
 

@@ -31,6 +31,7 @@ extern osMutexId_t       bleMutexHandle;
 extern osEventFlagsId_t  appEventsHandle;
 
 #define APP_EVT_BLE_READY   (1U << 0)
+#define APP_EVT_MOTION      (1U << 1)   /* LSM6DSL significant motion seen */
 
 /* Called once from TASK_BLE before it enters its event loop. Brings up
  * the BlueNRG-MS, creates the Accelerator service, starts advertising
@@ -44,6 +45,11 @@ void APP_BLE_Init(void);
  * they are safe to call from independent FreeRTOS threads. */
 void TASK_BLE_Run(void);
 void TASK_ACC_Run(void);
+
+/* Called from the EXTI15_10 ISR when PD11 (LSM6DSL INT1) pulses. Sets
+ * APP_EVT_MOTION so TASK_ACC can do the I2C ack + BLE notify safely in
+ * task context. MUST only use ISR-safe CMSIS-RTOS2 APIs. */
+void Motion_OnIsr(void);
 
 #ifdef __cplusplus
 }

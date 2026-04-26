@@ -25,6 +25,7 @@
 /* Private includes ----------------------------------------------------------*/
 /* USER CODE BEGIN Includes */
 #include "hci_tl_interface.h"
+#include "app_ble.h"
 /* USER CODE END Includes */
 
 /* Private typedef -----------------------------------------------------------*/
@@ -221,15 +222,24 @@ void EXTI15_10_IRQHandler(void)
 
 /* USER CODE BEGIN 1 */
 /**
- * @brief Dispatches GPIO EXTI callbacks. The SPBTLE-RF (BlueNRG-MS) IRQ
- *        line is PE6, and the BlueNRG HCI transport layer needs to be
- *        told whenever data is available on that line.
+ * @brief Dispatches GPIO EXTI callbacks.
+ *
+ *   - PE6  (SPBTLE_RF_IRQ_EXTI6)  : BlueNRG-MS has data on SPI3, forward to
+ *                                   the HCI low-level ISR.
+ *   - PD11 (LSM6DSL_INT1_EXTI11)  : LSM6DSL significant-motion event.
+ *                                   Signal TASK_ACC via an event flag; the
+ *                                   actual I2C ack + BLE notify happen in
+ *                                   task context (ISR-unsafe work).
  */
 void HAL_GPIO_EXTI_Callback(uint16_t GPIO_Pin)
 {
   if (GPIO_Pin == SPBTLE_RF_IRQ_EXTI6_Pin)
   {
     hci_tl_lowlevel_isr();
+  }
+  else if (GPIO_Pin == LSM6DSL_INT1_EXTI11_Pin)
+  {
+    Motion_OnIsr();
   }
 }
 /* USER CODE END 1 */
