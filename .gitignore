@@ -1,1 +1,4 @@
 Debug/
+build/
+Drivers/
+x-cube-ble1/
